@@ -1,44 +1,99 @@
 pipeline {
-  agent any 
-  options {
-    buildDiscarder(logRotator(numToKeepStr: '5'))
-  }
-  environment {
+  
+ 
+  
+    agent {
+    kubernetes {
+      yaml """
+apiVersion: v1
+kind: Pod
+metadata:
+          labels:
+            label: mylabel
+spec:
+  # Use service account that can deploy to all namespaces
+  ServiceAccountName: jenkins
+  containers:
+ 
+  - name: docker
+    image: docker:latest
+    command:
+    - cat
+    tty: true
+    volumeMounts:
+    - mountPath: /var/run/docker.sock
+      name: dockersock
+  volumes:
+    - name: dockersock
+      hostPath:
+        path: /var/run/docker.sock
+    - name: jenkins-data
+      persistentVolumeClaim:
+          claimName: jenkins
+    
+"""
+              }
+   }
+   environment {
     HEROKU_API_KEY = credentials('darinpope-heroku-api-key')
   }
   parameters { 
     string(name: 'APP_NAME', defaultValue: '', description: 'What is the Heroku app name?') 
   }
+  
+  tools {
+        maven "MAVEN"
+        jdk "JDK"
+  }
   stages {
-    stage('Build') {
+      stage('Initialize'){
+            steps{
+                echo "PATH = ${M2_HOME}/bin:${PATH}"
+                echo "M2_HOME = /opt/maven"
+            }
+        }
+        stage('Build') {
+            steps {
+                
+                sh 'mvn -Dmaven.test.failure.ignore=true clean package'
+               
+            
+            }
+        }
+       stage('Building image') {
+          steps {
+             container('docker') {
+          
+             sh 'docker build -t zubairbhat722/my-app:latest .'
+             }
+          }
+      }
+      stage('Publish image to Docker Hub') {
+          
+        steps {
+           container('docker') {
+           withDockerRegistry([ credentialsId: "dockerhub", url: "" ]) {
+           sh  'docker push zubairbhat722/my-app:latest'
+           
+              }
+        }
+                  
+          }
+    }
+    stage('Scan') {
       steps {
-        sh 'docker build -t darinpope/java-web-app:latest .'
+        withSonarQubeEnv(installationName: 'jenkinsSonar') {
+          sh 'mvn sonar:sonar'
+        }
+      }
+    }  
+    stage('Deploy App') {
+      steps {
+        script {
+          kubernetesDeploy(configs: "java.yaml", kubeconfigId: "mykubeconfigfile")
+        }
       }
     }
-    stage('Login') {
-      steps {
-        sh 'echo $HEROKU_API_KEY | docker login --username=_ --password-stdin registry.heroku.com'
-      }
-    }
-    stage('Push to Heroku registry') {
-      steps {
-        sh '''
-          docker tag darinpope/java-web-app:latest registry.heroku.com/$APP_NAME/web
-          docker push registry.heroku.com/$APP_NAME/web
-        '''
-      }
-    }
-    stage('Release the image') {
-      steps {
-        sh '''
-          heroku container:release web --app=$APP_NAME
-        '''
-      }
-    }
-  }
-  post {
-    always {
-      sh 'docker logout'
-    }
-  }
+  }  
+           
 }
